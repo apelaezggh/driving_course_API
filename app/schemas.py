@@ -39,6 +39,24 @@ class TopicCreate(TopicBase):
 
 class Topic(TopicBase):
     id: int
+    has_permission: Optional[bool] = None
+
+    class Config:
+        from_attributes = True
+
+# User Topic Permission schemas
+class UserTopicPermissionBase(BaseModel):
+    user_id: int
+    topic_id: int
+    is_active: bool
+
+class UserTopicPermissionCreate(UserTopicPermissionBase):
+    pass
+
+class UserTopicPermission(UserTopicPermissionBase):
+    id: int
+    granted_by: int
+    granted_at: datetime
 
     class Config:
         from_attributes = True
@@ -96,4 +114,13 @@ class Quiz(BaseModel):
 
 # Language preference
 class LanguagePreference(BaseModel):
-    language: str 
+    language: str
+
+# Admin schemas
+class GrantPermission(BaseModel):
+    user_id: int
+    topic_id: int
+
+class RevokePermission(BaseModel):
+    user_id: int
+    topic_id: int 

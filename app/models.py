@@ -23,6 +23,11 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     roles = relationship("Role", secondary=user_roles, back_populates="users")
     progress = relationship("UserProgress", back_populates="user")
+    topic_permissions = relationship(
+        "UserTopicPermission",
+        back_populates="user",
+        foreign_keys="UserTopicPermission.user_id"
+    )
 
 class Role(Base):
     __tablename__ = "roles"
@@ -40,6 +45,7 @@ class Topic(Base):
     description_en = Column(String)
     description_es = Column(String)
     questions = relationship("Question", back_populates="topic")
+    user_permissions = relationship("UserTopicPermission", back_populates="topic")
 
 class Question(Base):
     __tablename__ = "questions"
@@ -70,4 +76,18 @@ class UserProgress(Base):
     is_learned = Column(Boolean, default=False)
     learning_score = Column(Float, default=0.0)  # Score from 0 to 1
     user = relationship("User", back_populates="progress")
-    question = relationship("Question", back_populates="progress") 
+    question = relationship("Question", back_populates="progress")
+
+class UserTopicPermission(Base):
+    __tablename__ = "user_topic_permissions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    topic_id = Column(Integer, ForeignKey("topics.id"))
+    granted_by = Column(Integer, ForeignKey("users.id"))  # Admin who granted the permission
+    granted_at = Column(DateTime(timezone=True), server_default=func.now())
+    is_active = Column(Boolean, default=True)
+    
+    user = relationship("User", foreign_keys=[user_id], back_populates="topic_permissions")
+    topic = relationship("Topic", back_populates="user_permissions")
+    granted_by_user = relationship("User", foreign_keys=[granted_by]) 
