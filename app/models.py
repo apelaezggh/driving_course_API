@@ -42,8 +42,9 @@ class Topic(Base):
     id = Column(Integer, primary_key=True, index=True)
     name_en = Column(String, index=True)
     name_es = Column(String, index=True)
-    description_en = Column(String)
-    description_es = Column(String)
+    description_en = Column(String, default="")
+    description_es = Column(String, default="")
+    category = Column(String, default="basic")
     questions = relationship("Question", back_populates="topic")
     user_permissions = relationship("UserTopicPermission", back_populates="topic")
 

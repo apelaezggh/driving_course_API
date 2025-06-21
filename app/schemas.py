@@ -23,6 +23,8 @@ class User(UserBase):
 class Token(BaseModel):
     access_token: str
     token_type: str
+    username: str
+    id: int
 
 class TokenData(BaseModel):
     username: Optional[str] = None
@@ -31,8 +33,9 @@ class TokenData(BaseModel):
 class TopicBase(BaseModel):
     name_en: str
     name_es: str
-    description_en: str
-    description_es: str
+    description_en: Optional[str] = ""
+    description_es: Optional[str] = ""
+    category: Optional[str] = "basic"
 
 class TopicCreate(TopicBase):
     pass
@@ -123,4 +126,7 @@ class GrantPermission(BaseModel):
 
 class RevokePermission(BaseModel):
     user_id: int
-    topic_id: int 
+    topic_id: int
+
+class UserWithPermissions(User):
+    permissions: List[UserTopicPermission] = [] 

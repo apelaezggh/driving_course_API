@@ -67,7 +67,12 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     access_token = auth.create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer",
+        "username": user.username,
+        "id": user.id
+    }
 
 @app.post("/users/", response_model=schemas.User)
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
@@ -273,7 +278,17 @@ def grant_permission(
     if not auth.is_admin(current_user):
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    # Check if permission already exists
+    # Check if user exists
+    user = db.query(models.User).filter(models.User.id == permission.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Check if topic exists
+    topic = db.query(models.Topic).filter(models.Topic.id == permission.topic_id).first()
+    if not topic:
+        raise HTTPException(status_code=404, detail="Topic not found")
+    
+    # Check if permission already exists and is active
     existing_permission = db.query(models.UserTopicPermission).filter(
         models.UserTopicPermission.user_id == permission.user_id,
         models.UserTopicPermission.topic_id == permission.topic_id,
@@ -283,6 +298,21 @@ def grant_permission(
     if existing_permission:
         raise HTTPException(status_code=400, detail="Permission already granted")
     
+    # Check if there's an inactive permission and reactivate it
+    inactive_permission = db.query(models.UserTopicPermission).filter(
+        models.UserTopicPermission.user_id == permission.user_id,
+        models.UserTopicPermission.topic_id == permission.topic_id,
+        models.UserTopicPermission.is_active == False
+    ).first()
+    
+    if inactive_permission:
+        inactive_permission.is_active = True
+        inactive_permission.granted_by = current_user.id
+        db.commit()
+        db.refresh(inactive_permission)
+        return inactive_permission
+    
+    # Create new permission
     db_permission = models.UserTopicPermission(
         user_id=permission.user_id,
         topic_id=permission.topic_id,
@@ -315,7 +345,7 @@ def revoke_permission(
     db.commit()
     return {"message": "Permission revoked successfully"}
 
-@app.get("/admin/users", response_model=List[schemas.User])
+@app.get("/admin/users", response_model=List[schemas.UserWithPermissions])
 def get_users(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_active_user)
@@ -324,6 +354,15 @@ def get_users(
         raise HTTPException(status_code=403, detail="Not authorized")
     
     users = db.query(models.User).all()
+    
+    # Add permissions for each user
+    for user in users:
+        permissions = db.query(models.UserTopicPermission).filter(
+            models.UserTopicPermission.user_id == user.id,
+            models.UserTopicPermission.is_active == True
+        ).all()
+        user.permissions = permissions
+    
     return users
 
 # Question management endpoints (admin only)
@@ -433,6 +472,20 @@ def get_user_permissions(
     
     return permissions
 
+# Get current user permissions endpoint
+@app.get("/users/me/permissions", response_model=List[schemas.UserTopicPermission])
+def get_my_permissions(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    """Get permissions for the currently logged in user"""
+    permissions = db.query(models.UserTopicPermission).filter(
+        models.UserTopicPermission.user_id == current_user.id,
+        models.UserTopicPermission.is_active == True
+    ).all()
+    
+    return permissions
+
 # Language preference
 @app.put("/users/language", response_model=schemas.User)
 def update_language(
@@ -445,4 +498,74 @@ def update_language(
     current_user.language = language.language
     db.commit()
     db.refresh(current_user)
-    return current_user 
+    return current_user
+
+# Admin endpoints for topic management
+@app.post("/admin/topics", response_model=schemas.Topic)
+def create_topic_admin(
+    topic: schemas.TopicCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    if not auth.is_admin(current_user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    db_topic = models.Topic(**topic.dict())
+    db.add(db_topic)
+    db.commit()
+    db.refresh(db_topic)
+    return db_topic
+
+@app.delete("/admin/topics/{topic_id}")
+def delete_topic(
+    topic_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    if not auth.is_admin(current_user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    # Check if topic exists
+    topic = db.query(models.Topic).filter(models.Topic.id == topic_id).first()
+    if not topic:
+        raise HTTPException(status_code=404, detail="Topic not found")
+    
+    # Check if topic has questions
+    questions = db.query(models.Question).filter(models.Question.topic_id == topic_id).first()
+    if questions:
+        raise HTTPException(status_code=400, detail="Cannot delete topic with existing questions")
+    
+    # Check if topic has permissions
+    permissions = db.query(models.UserTopicPermission).filter(models.UserTopicPermission.topic_id == topic_id).first()
+    if permissions:
+        # Delete all permissions for this topic
+        db.query(models.UserTopicPermission).filter(models.UserTopicPermission.topic_id == topic_id).delete()
+    
+    db.delete(topic)
+    db.commit()
+    return {"message": "Topic deleted successfully"}
+
+@app.delete("/admin/topics/{topic_id}/force")
+def force_delete_topic(
+    topic_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    """Force delete a topic and all its questions (admin only)"""
+    if not auth.is_admin(current_user):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    topic = db.query(models.Topic).filter(models.Topic.id == topic_id).first()
+    if not topic:
+        raise HTTPException(status_code=404, detail="Topic not found")
+    
+    # Delete all questions associated with this topic
+    db.query(models.Question).filter(models.Question.topic_id == topic_id).delete()
+    
+    # Delete all user permissions for this topic
+    db.query(models.UserTopicPermission).filter(models.UserTopicPermission.topic_id == topic_id).delete()
+    
+    # Delete the topic
+    db.delete(topic)
+    db.commit()
+    
+    return {"message": "Topic and all associated questions deleted successfully"} 
