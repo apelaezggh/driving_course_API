@@ -253,17 +253,20 @@ def generate_quiz(
     quiz_questions = []
     for question in available_questions:
         # Get the correct language version
-        lang = current_user.language
+        lang = current_user.language if current_user.language else 'en'
+        print(f"Quiz generation - User ID: {current_user.id}, User language: {current_user.language}, Using lang: {lang}")
         question_text = getattr(question, f"question_{lang}")
         options = [
             getattr(question, f"option1_{lang}"),
             getattr(question, f"option2_{lang}"),
             getattr(question, f"option3_{lang}")
         ]
+        print(f"Quiz - Question {question.id}: lang={lang}, text={question_text}, options={options}, correct={question.correct_option}")
         quiz_questions.append(schemas.QuizQuestion(
             id=question.id,
             question=question_text,
-            options=options
+            options=options,
+            correct_option=question.correct_option
         ))
 
     return schemas.Quiz(questions=quiz_questions)
@@ -493,12 +496,23 @@ def update_language(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_active_user)
 ):
+    print(f"Language update request - User ID: {current_user.id}, Current language: {current_user.language}, New language: {language.language}")
+    
     if language.language not in ["en", "es"]:
         raise HTTPException(status_code=400, detail="Invalid language")
-    current_user.language = language.language
+    
+    # Get the user from the database session
+    user = db.query(models.User).filter(models.User.id == current_user.id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    print(f"Before update - User language: {user.language}")
+    user.language = language.language
     db.commit()
-    db.refresh(current_user)
-    return current_user
+    db.refresh(user)
+    print(f"After update - User language: {user.language}")
+    
+    return user
 
 # Admin endpoints for topic management
 @app.post("/admin/topics", response_model=schemas.Topic)

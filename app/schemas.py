@@ -111,6 +111,7 @@ class QuizQuestion(BaseModel):
     id: int
     question: str
     options: List[str]
+    correct_option: int
 
 class Quiz(BaseModel):
     questions: List[QuizQuestion]
