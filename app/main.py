@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from fastapi.security import OAuth2PasswordRequestForm
 from datetime import datetime, timedelta
 import random
+import re
 
 from . import models, schemas, auth
 from .database import engine, get_db
@@ -56,47 +57,74 @@ async def root():
 # Authentication endpoints
 @app.post("/token", response_model=schemas.Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.username == form_data.username).first()
-    if not user or not auth.verify_password(form_data.password, user.hashed_password):
+    print(f"Login attempt for username: {form_data.username}")
+    print(f"Password provided: {'Yes' if form_data.password else 'No'}")
+    
+    user = auth.authenticate_user(db, form_data.username, form_data.password)
+    print(f"Authentication result: {'Success' if user else 'Failed'}")
+    
+    if not user:
+        print("Login failed - user not found or password incorrect")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
+            detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    
+    print(f"Login successful for user: {user.email} (ID: {user.id})")
     access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = auth.create_access_token(
-        data={"sub": user.username}, expires_delta=access_token_expires
+        data={"sub": user.email}, expires_delta=access_token_expires
     )
-    return {
-        "access_token": access_token, 
-        "token_type": "bearer",
-        "username": user.username,
-        "id": user.id
-    }
+    
+    response_data = {"access_token": access_token, "token_type": "bearer", "email": user.email, "id": user.id, "name": user.name, "lastname": user.lastname, "is_admin": user.is_admin}
+    print(f"Returning token response: {response_data}")
+    return response_data
 
 @app.post("/users/", response_model=schemas.User)
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    # Check if email already exists
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    # Create user with default role
+    # Check if phone already exists
+    db_user_phone = db.query(models.User).filter(models.User.phone == user.phone).first()
+    if db_user_phone:
+        raise HTTPException(status_code=400, detail="Phone number already registered")
+    
+    # Validate email format
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    if not re.match(email_pattern, user.email):
+        raise HTTPException(status_code=400, detail="Invalid email format")
+    
+    # Validate phone format (more flexible validation)
+    # Remove all non-digit characters and check if it's a valid length
+    phone_digits = re.sub(r'\D', '', user.phone)
+    if len(phone_digits) < 10 or len(phone_digits) > 15:
+        raise HTTPException(status_code=400, detail="Phone must have between 10 and 15 digits")
+    
+    # Validate required fields
+    if not user.name or not user.name.strip():
+        raise HTTPException(status_code=400, detail="Name is required")
+    if not user.lastname or not user.lastname.strip():
+        raise HTTPException(status_code=400, detail="Last name is required")
+    if not user.email or not user.email.strip():
+        raise HTTPException(status_code=400, detail="Email is required")
+    if not user.phone or not user.phone.strip():
+        raise HTTPException(status_code=400, detail="Phone is required")
+    if not user.password or len(user.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    
     hashed_password = auth.get_password_hash(user.password)
     db_user = models.User(
-        email=user.email,
-        username=user.username,
-        hashed_password=hashed_password
+        name=user.name.strip(),
+        lastname=user.lastname.strip(),
+        email=user.email.lower().strip(),
+        phone=user.phone.strip(),
+        hashed_password=hashed_password,
+        language=user.language
     )
-    
-    # Add default user role
-    user_role = db.query(models.Role).filter(models.Role.name == "user").first()
-    if not user_role:
-        user_role = models.Role(name="user")
-        db.add(user_role)
-        db.commit()
-        db.refresh(user_role)
-    
-    db_user.roles.append(user_role)
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
@@ -353,14 +381,14 @@ def generate_quiz(
     if total_questions == 0:
         raise HTTPException(
             status_code=404, 
-            detail=f"Quiz no disponible. Este tema necesita {target_quiz_size} preguntas pero solo tiene 0 disponibles."
+            detail="Quiz no disponible."
         )
     
     # Check if we have enough questions for the target quiz size
     if total_questions < target_quiz_size:
         raise HTTPException(
             status_code=404, 
-            detail=f"Quiz no disponible. Este tema necesita {target_quiz_size} preguntas pero solo tiene {total_questions} disponibles."
+            detail="Quiz no disponible."
         )
     
     # Get user's progress for this topic

@@ -4,8 +4,11 @@ from datetime import datetime
 
 # User schemas
 class UserBase(BaseModel):
-    email: EmailStr
-    username: str
+    name: str
+    lastname: str
+    email: str
+    phone: str
+    language: str = "en"
 
 class UserCreate(UserBase):
     password: str
@@ -13,8 +16,9 @@ class UserCreate(UserBase):
 class User(UserBase):
     id: int
     is_active: bool
-    language: str
+    is_admin: bool
     created_at: datetime
+    updated_at: datetime
 
     class Config:
         from_attributes = True
@@ -23,11 +27,14 @@ class User(UserBase):
 class Token(BaseModel):
     access_token: str
     token_type: str
-    username: str
+    email: str
     id: int
+    name: str
+    lastname: str
+    is_admin: bool
 
 class TokenData(BaseModel):
-    username: Optional[str] = None
+    email: Optional[str] = None
 
 # Topic schemas
 class TopicBase(BaseModel):
