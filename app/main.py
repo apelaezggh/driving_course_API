@@ -124,7 +124,7 @@ def get_topics(
 ):
     topics = db.query(models.Topic).all()
     
-    # Add permission information for each topic
+    # Add permission and progress information for each topic
     for topic in topics:
         permission = db.query(models.UserTopicPermission).filter(
             models.UserTopicPermission.user_id == current_user.id,
@@ -132,6 +132,32 @@ def get_topics(
             models.UserTopicPermission.is_active == True
         ).first()
         topic.has_permission = permission is not None or auth.is_admin(current_user)
+        
+        # Get learning progress for this topic
+        if topic.has_permission:
+            # Get all questions for this topic
+            total_questions = db.query(models.Question).filter(
+                models.Question.topic_id == topic.id
+            ).count()
+            
+            # Get learned questions for this topic
+            learned_questions = db.query(models.Question).join(
+                models.UserProgress
+            ).filter(
+                models.Question.topic_id == topic.id,
+                models.UserProgress.user_id == current_user.id,
+                models.UserProgress.is_learned == True
+            ).count()
+            
+            topic.total_questions = total_questions
+            topic.learned_questions = learned_questions
+            topic.learning_progress = round((learned_questions / total_questions * 100) if total_questions > 0 else 0, 1)
+            topic.is_mastered = learned_questions == total_questions and total_questions > 0
+        else:
+            topic.total_questions = 0
+            topic.learned_questions = 0
+            topic.learning_progress = 0
+            topic.is_mastered = False
     
     return topics
 
@@ -176,6 +202,9 @@ def update_progress(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_active_user)
 ):
+    print(f"Progress update - User: {current_user.id}, Question: {progress.question_id}")
+    print(f"Progress data received: {progress.dict()}")
+    
     # Verify the question belongs to a topic the user has permission for
     question = db.query(models.Question).filter(models.Question.id == progress.question_id).first()
     if not question:
@@ -196,24 +225,99 @@ def update_progress(
     ).first()
 
     if not db_progress:
+        print(f"Creating new progress record for user {current_user.id}, question {progress.question_id}")
         db_progress = models.UserProgress(
             user_id=current_user.id,
-            question_id=progress.question_id
+            question_id=progress.question_id,
+            attempts=0,
+            correct_attempts=0,
+            is_learned=False,
+            learning_score=0.0
         )
         db.add(db_progress)
+    else:
+        # Ensure all fields are properly initialized
+        if db_progress.attempts is None:
+            db_progress.attempts = 0
+        if db_progress.correct_attempts is None:
+            db_progress.correct_attempts = 0
+        if db_progress.is_learned is None:
+            db_progress.is_learned = False
+        if db_progress.learning_score is None:
+            db_progress.learning_score = 0.0
 
+    print(f"Current progress - attempts: {db_progress.attempts}, correct: {db_progress.correct_attempts}, learned: {db_progress.is_learned}")
+    
+    # Ensure correct_attempts is a number
+    current_correct_attempts = db_progress.correct_attempts or 0
+    
+    # The frontend sends 1 if correct, 0 if incorrect
+    is_correct = progress.correct_attempts == 1
+    print(f"Is correct: {is_correct}")
+    
     db_progress.attempts += 1
-    db_progress.correct_attempts += 1 if progress.correct_attempts > db_progress.correct_attempts else 0
+    if is_correct:
+        db_progress.correct_attempts = current_correct_attempts + 1
+        # Check for 3 consecutive correct answers
+        if db_progress.correct_attempts >= 3:
+            db_progress.is_learned = True
+            print(f"Question {progress.question_id} marked as learned!")
+    else:
+        # Reset consecutive correct count if answer was wrong
+        db_progress.correct_attempts = 0
+        db_progress.is_learned = False
+        print(f"Question {progress.question_id} reset - wrong answer")
+    
     db_progress.last_attempt = datetime.utcnow()
 
     # Calculate learning score (0 to 1)
     if db_progress.attempts > 0:
         db_progress.learning_score = db_progress.correct_attempts / db_progress.attempts
-        # Mark as learned if score is above 0.8 and at least 3 attempts
-        db_progress.is_learned = db_progress.learning_score >= 0.8 and db_progress.attempts >= 3
+
+    print(f"Updated progress - attempts: {db_progress.attempts}, correct: {db_progress.correct_attempts}, learned: {db_progress.is_learned}, score: {db_progress.learning_score}")
 
     db.commit()
     db.refresh(db_progress)
+    return db_progress
+
+@app.get("/progress/{question_id}", response_model=schemas.UserProgress)
+def get_progress(
+    question_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    # Verify the question belongs to a topic the user has permission for
+    question = db.query(models.Question).filter(models.Question.id == question_id).first()
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+    
+    if not auth.is_admin(current_user):
+        permission = db.query(models.UserTopicPermission).filter(
+            models.UserTopicPermission.user_id == current_user.id,
+            models.UserTopicPermission.topic_id == question.topic_id,
+            models.UserTopicPermission.is_active == True
+        ).first()
+        if not permission:
+            raise HTTPException(status_code=403, detail="No permission for this topic")
+    
+    db_progress = db.query(models.UserProgress).filter(
+        models.UserProgress.user_id == current_user.id,
+        models.UserProgress.question_id == question_id
+    ).first()
+
+    if not db_progress:
+        # Return default progress if none exists
+        return schemas.UserProgress(
+            id=0,
+            user_id=current_user.id,
+            question_id=question_id,
+            attempts=0,
+            correct_attempts=0,
+            is_learned=False,
+            learning_score=0.0,
+            last_attempt=datetime.utcnow()
+        )
+    
     return db_progress
 
 # Quiz generation
@@ -233,42 +337,147 @@ def generate_quiz(
         if not permission:
             raise HTTPException(status_code=403, detail="No permission for this topic")
     
-    # Get questions that are not learned
-    learned_questions = db.query(models.UserProgress.question_id).filter(
+    # Get topic and its target_quiz_size
+    topic = db.query(models.Topic).filter(models.Topic.id == topic_id).first()
+    if not topic:
+        raise HTTPException(status_code=404, detail="Topic not found")
+    
+    target_quiz_size = topic.target_quiz_size or 10  # How many questions the quiz should have
+    
+    # Get total questions for this topic
+    total_questions = db.query(models.Question).filter(
+        models.Question.topic_id == topic_id
+    ).count()
+    
+    # Always show the same message format for unavailable quizzes
+    if total_questions == 0:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Quiz no disponible. Este tema necesita {target_quiz_size} preguntas pero solo tiene 0 disponibles."
+        )
+    
+    # Check if we have enough questions for the target quiz size
+    if total_questions < target_quiz_size:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Quiz no disponible. Este tema necesita {target_quiz_size} preguntas pero solo tiene {total_questions} disponibles."
+        )
+    
+    # Get user's progress for this topic
+    user_progress = db.query(models.UserProgress).filter(
         models.UserProgress.user_id == current_user.id,
-        models.UserProgress.is_learned == True
-    ).subquery()
-
-    available_questions = db.query(models.Question).filter(
-        models.Question.topic_id == topic_id,
-        ~models.Question.id.in_(learned_questions)
+        models.UserProgress.question_id.in_(
+            db.query(models.Question.id).filter(models.Question.topic_id == topic_id)
+        )
     ).all()
-
-    if not available_questions:
-        # If all questions are learned, get some random questions
-        available_questions = db.query(models.Question).filter(
+    
+    # Create a dictionary of question_id -> progress for quick lookup
+    progress_dict = {p.question_id: p for p in user_progress}
+    
+    # Get all questions for this topic
+    all_questions = db.query(models.Question).filter(
+        models.Question.topic_id == topic_id
+    ).all()
+    
+    # Separate questions into learned and not learned
+    learned_questions = []
+    not_learned_questions = []
+    
+    for question in all_questions:
+        progress = progress_dict.get(question.id)
+        if progress and progress.is_learned:
+            learned_questions.append(question)
+        else:
+            not_learned_questions.append(question)
+    
+    # Check if user has mastered all questions
+    if len(learned_questions) == len(all_questions) and len(all_questions) > 0:
+        print(f"Topic {topic_id} is mastered. Resetting progress for user {current_user.id}")
+        
+        # Reset all progress for this topic
+        for progress in user_progress:
+            progress.attempts = 0
+            progress.correct_attempts = 0
+            progress.is_learned = False
+            progress.learning_score = 0.0
+        db.commit()
+        
+        # Re-fetch questions after reset (now all questions are not learned)
+        all_questions = db.query(models.Question).filter(
             models.Question.topic_id == topic_id
-        ).order_by(func.random()).limit(5).all()
-
-    quiz_questions = []
-    for question in available_questions:
-        # Get the correct language version
+        ).all()
+        
+        # Select questions for the quiz (now all questions are available)
+        selected_questions = random.sample(all_questions, min(target_quiz_size, len(all_questions)))
+        
+        # Shuffle the selected questions
+        random.shuffle(selected_questions)
+        
+        # Build quiz questions
+        quiz_questions = []
         lang = current_user.language if current_user.language else 'en'
-        print(f"Quiz generation - User ID: {current_user.id}, User language: {current_user.language}, Using lang: {lang}")
+        
+        for question in selected_questions:
+            question_text = getattr(question, f"question_{lang}")
+            options = [
+                getattr(question, f"option1_{lang}"),
+                getattr(question, f"option2_{lang}"),
+                getattr(question, f"option3_{lang}")
+            ]
+            
+            quiz_questions.append(schemas.QuizQuestion(
+                id=question.id,
+                question=question_text,
+                options=options,
+                correct_option=question.correct_option
+            ))
+        
+        return schemas.Quiz(questions=quiz_questions)
+    
+    # Select questions for the quiz
+    selected_questions = []
+    
+    # First, try to fill with not learned questions
+    if len(not_learned_questions) >= target_quiz_size:
+        # Randomly select target_quiz_size questions from not learned
+        selected_questions = random.sample(not_learned_questions, target_quiz_size)
+    else:
+        # Add all not learned questions
+        selected_questions.extend(not_learned_questions)
+        
+        # If we still need more questions, add from learned questions
+        # Prioritize recently incorrectly answered questions
+        if len(selected_questions) < target_quiz_size:
+            remaining_needed = target_quiz_size - len(selected_questions)
+            
+            # Sort learned questions by last_attempt (most recent first)
+            learned_questions.sort(key=lambda q: progress_dict.get(q.id, models.UserProgress()).last_attempt or datetime.min, reverse=True)
+            
+            # Add the most recently attempted learned questions
+            selected_questions.extend(learned_questions[:remaining_needed])
+    
+    # Shuffle the selected questions
+    random.shuffle(selected_questions)
+    
+    # Build quiz questions
+    quiz_questions = []
+    lang = current_user.language if current_user.language else 'en'
+    
+    for question in selected_questions:
         question_text = getattr(question, f"question_{lang}")
         options = [
             getattr(question, f"option1_{lang}"),
             getattr(question, f"option2_{lang}"),
             getattr(question, f"option3_{lang}")
         ]
-        print(f"Quiz - Question {question.id}: lang={lang}, text={question_text}, options={options}, correct={question.correct_option}")
+        
         quiz_questions.append(schemas.QuizQuestion(
             id=question.id,
             question=question_text,
             options=options,
             correct_option=question.correct_option
         ))
-
+    
     return schemas.Quiz(questions=quiz_questions)
 
 # Permission management endpoints (admin only)

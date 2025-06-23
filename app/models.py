@@ -45,6 +45,8 @@ class Topic(Base):
     description_en = Column(String, default="")
     description_es = Column(String, default="")
     category = Column(String, default="basic")
+    quiz_size = Column(Integer, default=10)  # Number of questions per quiz (actual)
+    target_quiz_size = Column(Integer, default=10)  # Number of questions the quiz should have (target)
     questions = relationship("Question", back_populates="topic")
     user_permissions = relationship("UserTopicPermission", back_populates="topic")
 

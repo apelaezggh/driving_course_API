@@ -36,6 +36,8 @@ class TopicBase(BaseModel):
     description_en: Optional[str] = ""
     description_es: Optional[str] = ""
     category: Optional[str] = "basic"
+    quiz_size: Optional[int] = 10
+    target_quiz_size: Optional[int] = 10
 
 class TopicCreate(TopicBase):
     pass
@@ -43,6 +45,10 @@ class TopicCreate(TopicBase):
 class Topic(TopicBase):
     id: int
     has_permission: Optional[bool] = None
+    total_questions: Optional[int] = None
+    learned_questions: Optional[int] = None
+    learning_progress: Optional[float] = None
+    is_mastered: Optional[bool] = None
 
     class Config:
         from_attributes = True
