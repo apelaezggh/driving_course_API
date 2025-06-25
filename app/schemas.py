@@ -23,6 +23,36 @@ class User(UserBase):
     class Config:
         from_attributes = True
 
+# Session schemas
+class UserSessionBase(BaseModel):
+    device_info: Optional[str] = None
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+
+class UserSessionCreate(UserSessionBase):
+    user_id: int
+    session_token: str
+
+class UserSession(UserSessionBase):
+    id: int
+    user_id: int
+    session_token: str
+    is_active: bool
+    created_at: datetime
+    last_activity: datetime
+
+    class Config:
+        from_attributes = True
+
+class UserSessionWithUser(UserSession):
+    user_name: str
+    user_email: str
+    user_is_admin: bool
+    session_duration: float
+
+    class Config:
+        from_attributes = True
+
 # Token schemas
 class Token(BaseModel):
     access_token: str
@@ -143,4 +173,15 @@ class RevokePermission(BaseModel):
     topic_id: int
 
 class UserWithPermissions(User):
-    permissions: List[UserTopicPermission] = [] 
+    permissions: List[UserTopicPermission] = []
+
+# Google OAuth schemas
+class GoogleLogin(BaseModel):
+    token: str
+
+class GoogleUserInfo(BaseModel):
+    google_id: str
+    email: str
+    name: str
+    lastname: str
+    picture: Optional[str] = None 

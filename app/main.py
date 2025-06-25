@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 import random
 import re
 
-from . import models, schemas, auth
+from . import models, schemas, auth, google_oauth
 from .database import engine, get_db
 
 load_dotenv()
@@ -56,7 +56,7 @@ async def root():
 
 # Authentication endpoints
 @app.post("/token", response_model=schemas.Token)
-async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db), request: Request = None):
     print(f"Login attempt for username: {form_data.username}")
     print(f"Password provided: {'Yes' if form_data.password else 'No'}")
     
@@ -72,6 +72,16 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         )
     
     print(f"Login successful for user: {user.email} (ID: {user.id})")
+    
+    # Create user session if request is available
+    if request:
+        try:
+            auth.create_user_session(db, user.id, request)
+            print(f"User session created for user: {user.email}")
+        except Exception as e:
+            print(f"Error creating user session: {e}")
+            # Continue with login even if session creation fails
+    
     access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = auth.create_access_token(
         data={"sub": user.email}, expires_delta=access_token_expires
@@ -80,6 +90,94 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     response_data = {"access_token": access_token, "token_type": "bearer", "email": user.email, "id": user.id, "name": user.name, "lastname": user.lastname, "is_admin": user.is_admin}
     print(f"Returning token response: {response_data}")
     return response_data
+
+@app.post("/google-login", response_model=schemas.Token)
+async def google_login(google_data: schemas.GoogleLogin, db: Session = Depends(get_db), request: Request = None):
+    print(f"Google login attempt with token")
+    
+    # Verify Google token
+    google_user_info = google_oauth.verify_google_token(google_data.token)
+    if not google_user_info:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Google token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    print(f"Google user info verified: {google_user_info['email']}")
+    
+    # Get or create user
+    user = google_oauth.get_or_create_google_user(google_user_info, db)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error creating user",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    print(f"Google login successful for user: {user.email} (ID: {user.id})")
+    
+    # Create user session if request is available
+    if request:
+        try:
+            auth.create_user_session(db, user.id, request)
+            print(f"User session created for Google user: {user.email}")
+        except Exception as e:
+            print(f"Error creating user session for Google login: {e}")
+            # Continue with login even if session creation fails
+    
+    # Create access token
+    access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = auth.create_access_token(
+        data={"sub": user.email}, expires_delta=access_token_expires
+    )
+    
+    response_data = {"access_token": access_token, "token_type": "bearer", "email": user.email, "id": user.id, "name": user.name, "lastname": user.lastname, "is_admin": user.is_admin}
+    print(f"Returning Google token response: {response_data}")
+    return response_data
+
+@app.get("/users/me", response_model=schemas.User)
+async def get_current_user_info(current_user: models.User = Depends(auth.get_current_active_user)):
+    """Get current user information"""
+    return current_user
+
+@app.get("/users/session-status")
+async def check_session_status(
+    current_user: models.User = Depends(auth.get_current_active_user), 
+    db: Session = Depends(get_db),
+    request: Request = None
+):
+    """Check if the user's session is still active"""
+    if not request:
+        return {"session_active": True}
+    
+    # Check if user has any active sessions
+    active_sessions = db.query(models.UserSession).filter(
+        models.UserSession.user_id == current_user.id,
+        models.UserSession.is_active == True
+    ).count()
+    
+    if active_sessions == 0:
+        # No active sessions found, session has been terminated
+        return {"session_active": False, "message": "Session terminated"}
+    
+    return {"session_active": True, "active_sessions": active_sessions}
+
+@app.post("/logout")
+async def logout(current_user: models.User = Depends(auth.get_current_active_user), db: Session = Depends(get_db)):
+    """Logout user and invalidate session"""
+    # Deactivate all active sessions for this user
+    active_sessions = db.query(models.UserSession).filter(
+        models.UserSession.user_id == current_user.id,
+        models.UserSession.is_active == True
+    ).all()
+    
+    for session in active_sessions:
+        session.is_active = False
+        session.last_activity = datetime.utcnow()
+    
+    db.commit()
+    return {"message": "Logged out successfully"}
 
 @app.post("/users/", response_model=schemas.User)
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
@@ -819,4 +917,96 @@ def force_delete_topic(
     db.delete(topic)
     db.commit()
     
-    return {"message": "Topic and all associated questions deleted successfully"} 
+    return {"message": "Topic and all associated questions deleted successfully"}
+
+@app.get("/admin/sessions", response_model=List[schemas.UserSessionWithUser])
+def get_active_sessions(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    """Get all active sessions (admin only)"""
+    if not auth.is_admin(current_user):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    # Get all active sessions with user information
+    active_sessions = db.query(models.UserSession).join(
+        models.User
+    ).filter(
+        models.UserSession.is_active == True
+    ).all()
+    
+    # Convert to response format
+    sessions_with_user = []
+    for session in active_sessions:
+        # Calculate session duration
+        created_at = session.created_at
+        last_activity = session.last_activity
+        duration_hours = (last_activity - created_at).total_seconds() / 3600
+        
+        session_data = {
+            "id": session.id,  # Use 'id' instead of 'session_id'
+            "user_id": session.user_id,
+            "session_token": session.session_token,
+            "device_info": session.device_info,
+            "ip_address": session.ip_address,
+            "user_agent": session.user_agent,
+            "is_active": session.is_active,
+            "created_at": session.created_at,
+            "last_activity": session.last_activity,
+            "session_duration": duration_hours,  # Add duration in hours
+            "user_name": f"{session.user.name} {session.user.lastname}",
+            "user_email": session.user.email,
+            "user_is_admin": session.user.is_admin
+        }
+        sessions_with_user.append(session_data)
+    
+    return sessions_with_user
+
+@app.delete("/admin/sessions/{session_id}")
+def terminate_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    """Terminate a specific session (admin only)"""
+    if not auth.is_admin(current_user):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    session = db.query(models.UserSession).filter(models.UserSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session.is_active = False
+    session.last_activity = datetime.utcnow()
+    db.commit()
+    
+    return {"message": "Session terminated successfully"}
+
+@app.delete("/admin/users/{user_id}/sessions")
+def terminate_all_user_sessions(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    """Terminate all sessions for a specific user (admin only)"""
+    if not auth.is_admin(current_user):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    # Check if user exists
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Terminate all active sessions for this user
+    active_sessions = db.query(models.UserSession).filter(
+        models.UserSession.user_id == user_id,
+        models.UserSession.is_active == True
+    ).all()
+    
+    for session in active_sessions:
+        session.is_active = False
+        session.last_activity = datetime.utcnow()
+    
+    db.commit()
+    
+    return {"message": f"All sessions for user {user.email} terminated successfully"} 

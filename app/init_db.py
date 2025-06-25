@@ -10,7 +10,12 @@ def init_db():
     db = SessionLocal()
     
     try:
-        # Delete all existing users except admin
+        # Delete related records first to avoid foreign key violations
+        db.query(models.UserSession).delete()
+        db.query(models.UserProgress).delete()
+        db.query(models.UserTopicPermission).delete()
+        db.query(models.Question).delete()
+        db.query(models.Topic).delete()
         db.query(models.User).delete()
         db.commit()
         

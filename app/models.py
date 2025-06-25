@@ -19,8 +19,9 @@ class User(Base):
     name = Column(String, nullable=False)
     lastname = Column(String, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
-    phone = Column(String, unique=True, nullable=False)
+    phone = Column(String, nullable=True)  # Removed unique constraint to allow multiple users with empty phone
     hashed_password = Column(String, nullable=False)
+    google_id = Column(String, unique=True, nullable=True)  # Google OAuth ID
     is_active = Column(Boolean, default=True)
     is_admin = Column(Boolean, default=False)
     language = Column(String, default='en')
@@ -33,6 +34,7 @@ class User(Base):
         back_populates="user",
         foreign_keys="UserTopicPermission.user_id"
     )
+    sessions = relationship("UserSession", back_populates="user")
 
 class Role(Base):
     __tablename__ = "roles"
@@ -98,4 +100,19 @@ class UserTopicPermission(Base):
     
     user = relationship("User", foreign_keys=[user_id], back_populates="topic_permissions")
     topic = relationship("Topic", back_populates="user_permissions")
-    granted_by_user = relationship("User", foreign_keys=[granted_by]) 
+    granted_by_user = relationship("User", foreign_keys=[granted_by])
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    session_token = Column(String, unique=True, index=True, nullable=False)
+    device_info = Column(String, nullable=True)  # Información del dispositivo
+    ip_address = Column(String, nullable=True)   # Dirección IP
+    user_agent = Column(String, nullable=True)   # User agent del navegador
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_activity = Column(DateTime, default=datetime.utcnow)
+    
+    user = relationship("User", back_populates="sessions") 
