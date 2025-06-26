@@ -7,7 +7,7 @@ class UserBase(BaseModel):
     name: str
     lastname: str
     email: str
-    phone: str
+    phone: Optional[str] = None
     language: str = "en"
 
 class UserCreate(UserBase):
@@ -56,7 +56,9 @@ class UserSessionWithUser(UserSession):
 # Token schemas
 class Token(BaseModel):
     access_token: str
-    token_type: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int
     email: str
     id: int
     name: str
@@ -65,6 +67,35 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     email: Optional[str] = None
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+class RefreshTokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+# Refresh Token schemas
+class RefreshTokenBase(BaseModel):
+    user_id: int
+    token: str
+    expires_at: datetime
+    is_revoked: bool = False
+    device_info: Optional[str] = None
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+
+class RefreshTokenCreate(RefreshTokenBase):
+    pass
+
+class RefreshToken(RefreshTokenBase):
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 # Topic schemas
 class TopicBase(BaseModel):

@@ -82,12 +82,38 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
             print(f"Error creating user session: {e}")
             # Continue with login even if session creation fails
     
+    # Create access token
     access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = auth.create_access_token(
         data={"sub": user.email}, expires_delta=access_token_expires
     )
     
-    response_data = {"access_token": access_token, "token_type": "bearer", "email": user.email, "id": user.id, "name": user.name, "lastname": user.lastname, "is_admin": user.is_admin}
+    # Create refresh token
+    refresh_token, expires_at, device_info, ip_address, user_agent = auth.create_refresh_token(user.id, request)
+    
+    # Store refresh token in database
+    db_refresh_token = models.RefreshToken(
+        user_id=user.id,
+        token=refresh_token,
+        expires_at=expires_at,
+        device_info=device_info,
+        ip_address=ip_address,
+        user_agent=user_agent
+    )
+    db.add(db_refresh_token)
+    db.commit()
+    
+    response_data = {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "expires_in": auth.ACCESS_TOKEN_EXPIRE_MINUTES * 60,  # Convert to seconds
+        "email": user.email,
+        "id": user.id,
+        "name": user.name,
+        "lastname": user.lastname,
+        "is_admin": user.is_admin
+    }
     print(f"Returning token response: {response_data}")
     return response_data
 
@@ -132,8 +158,108 @@ async def google_login(google_data: schemas.GoogleLogin, db: Session = Depends(g
         data={"sub": user.email}, expires_delta=access_token_expires
     )
     
-    response_data = {"access_token": access_token, "token_type": "bearer", "email": user.email, "id": user.id, "name": user.name, "lastname": user.lastname, "is_admin": user.is_admin}
+    # Create refresh token
+    refresh_token, expires_at, device_info, ip_address, user_agent = auth.create_refresh_token(user.id, request)
+    
+    # Store refresh token in database
+    db_refresh_token = models.RefreshToken(
+        user_id=user.id,
+        token=refresh_token,
+        expires_at=expires_at,
+        device_info=device_info,
+        ip_address=ip_address,
+        user_agent=user_agent
+    )
+    db.add(db_refresh_token)
+    db.commit()
+    
+    response_data = {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "expires_in": auth.ACCESS_TOKEN_EXPIRE_MINUTES * 60,  # Convert to seconds
+        "email": user.email,
+        "id": user.id,
+        "name": user.name,
+        "lastname": user.lastname,
+        "is_admin": user.is_admin
+    }
     print(f"Returning Google token response: {response_data}")
+    return response_data
+
+@app.post("/refresh", response_model=schemas.RefreshTokenResponse)
+async def refresh_access_token(
+    refresh_data: schemas.RefreshTokenRequest,
+    db: Session = Depends(get_db),
+    request: Request = None
+):
+    """Refresh access token using refresh token"""
+    print(f"Refresh token request received: {refresh_data.refresh_token[:20]}...")
+    
+    # Verify refresh token
+    refresh_token = auth.verify_refresh_token(refresh_data.refresh_token, db)
+    if not refresh_token:
+        print(f"Refresh token verification failed for token: {refresh_data.refresh_token[:20]}...")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    print(f"Refresh token verified successfully for user: {refresh_token.user_id}")
+    
+    # Get user
+    user = db.query(models.User).filter(models.User.id == refresh_token.user_id).first()
+    if not user or not user.is_active:
+        print(f"User not found or inactive: {refresh_token.user_id}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    print(f"User found and active: {user.email}")
+    
+    # Create new access token
+    access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = auth.create_access_token(
+        data={"sub": user.email}, expires_delta=access_token_expires
+    )
+    
+    print(f"New access token created for user: {user.email}")
+    
+    # Create new refresh token (rotate refresh tokens for security)
+    new_refresh_token, expires_at, device_info, ip_address, user_agent = auth.create_refresh_token(user.id, request)
+    
+    print(f"New refresh token created for user: {user.id}")
+    
+    # Revoke old refresh token
+    auth.revoke_refresh_token(refresh_data.refresh_token, db)
+    
+    print(f"Old refresh token revoked")
+    
+    # Store new refresh token in database
+    db_refresh_token = models.RefreshToken(
+        user_id=user.id,
+        token=new_refresh_token,
+        expires_at=expires_at,
+        device_info=device_info,
+        ip_address=ip_address,
+        user_agent=user_agent
+    )
+    db.add(db_refresh_token)
+    db.commit()
+    
+    print(f"New refresh token stored in database")
+    
+    response_data = {
+        "access_token": access_token,
+        "refresh_token": new_refresh_token,
+        "token_type": "bearer",
+        "expires_in": auth.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    }
+    
+    print(f"Refresh token response sent successfully")
     return response_data
 
 @app.get("/users/me", response_model=schemas.User)
@@ -176,6 +302,9 @@ async def logout(current_user: models.User = Depends(auth.get_current_active_use
         session.is_active = False
         session.last_activity = datetime.utcnow()
     
+    # Revoke all refresh tokens for this user
+    auth.revoke_all_user_refresh_tokens(current_user.id, db)
+    
     db.commit()
     return {"message": "Logged out successfully"}
 
@@ -186,21 +315,26 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    # Check if phone already exists
-    db_user_phone = db.query(models.User).filter(models.User.phone == user.phone).first()
-    if db_user_phone:
-        raise HTTPException(status_code=400, detail="Phone number already registered")
+    # Check if phone already exists (only if phone is provided)
+    if user.phone:
+        db_user_phone = db.query(models.User).filter(
+            models.User.phone == user.phone,
+            models.User.phone.isnot(None)
+        ).first()
+        if db_user_phone:
+            raise HTTPException(status_code=400, detail="Phone number already registered")
     
     # Validate email format
     email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     if not re.match(email_pattern, user.email):
         raise HTTPException(status_code=400, detail="Invalid email format")
     
-    # Validate phone format (more flexible validation)
-    # Remove all non-digit characters and check if it's a valid length
-    phone_digits = re.sub(r'\D', '', user.phone)
-    if len(phone_digits) < 10 or len(phone_digits) > 15:
-        raise HTTPException(status_code=400, detail="Phone must have between 10 and 15 digits")
+    # Validate phone format (only if phone is provided)
+    if user.phone:
+        # Remove all non-digit characters and check if it's a valid length
+        phone_digits = re.sub(r'\D', '', user.phone)
+        if len(phone_digits) < 10 or len(phone_digits) > 15:
+            raise HTTPException(status_code=400, detail="Phone must have between 10 and 15 digits")
     
     # Validate required fields
     if not user.name or not user.name.strip():
@@ -209,8 +343,6 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Last name is required")
     if not user.email or not user.email.strip():
         raise HTTPException(status_code=400, detail="Email is required")
-    if not user.phone or not user.phone.strip():
-        raise HTTPException(status_code=400, detail="Phone is required")
     if not user.password or len(user.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     
@@ -219,7 +351,7 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
         name=user.name.strip(),
         lastname=user.lastname.strip(),
         email=user.email.lower().strip(),
-        phone=user.phone.strip(),
+        phone=user.phone.strip() if user.phone else None,
         hashed_password=hashed_password,
         language=user.language
     )

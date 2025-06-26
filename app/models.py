@@ -35,6 +35,7 @@ class User(Base):
         foreign_keys="UserTopicPermission.user_id"
     )
     sessions = relationship("UserSession", back_populates="user")
+    refresh_tokens = relationship("RefreshToken", back_populates="user")
 
 class Role(Base):
     __tablename__ = "roles"
@@ -115,4 +116,19 @@ class UserSession(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     last_activity = Column(DateTime, default=datetime.utcnow)
     
-    user = relationship("User", back_populates="sessions") 
+    user = relationship("User", back_populates="sessions")
+
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    token = Column(String, unique=True, index=True, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    is_revoked = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    device_info = Column(String, nullable=True)
+    ip_address = Column(String, nullable=True)
+    user_agent = Column(String, nullable=True)
+    
+    user = relationship("User", back_populates="refresh_tokens") 

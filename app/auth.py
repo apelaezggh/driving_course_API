@@ -8,11 +8,16 @@ from sqlalchemy.orm import Session
 from . import models, schemas
 from .database import get_db
 import secrets
+import os
+from dotenv import load_dotenv
 
-# Security configuration
-SECRET_KEY = "your-secret-key-here"  # Change this in production!
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+load_dotenv()
+
+# Security configuration from environment variables
+SECRET_KEY = os.getenv("API_SECRET_KEY", "your-secret-key-here")
+ALGORITHM = os.getenv("API_ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("API_ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("API_REFRESH_TOKEN_EXPIRE_DAYS", "30"))
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
@@ -32,6 +37,58 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
+
+def create_refresh_token(user_id: int, request: Request = None) -> str:
+    """Create a new refresh token"""
+    token = secrets.token_urlsafe(64)
+    expires_at = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    
+    # Get client info if request is available
+    device_info = ""
+    ip_address = ""
+    user_agent = ""
+    
+    if request:
+        device_info = get_client_info(request)["device_info"]
+        ip_address = get_client_info(request)["ip_address"]
+        user_agent = get_client_info(request)["user_agent"]
+    
+    return token, expires_at, device_info, ip_address, user_agent
+
+def verify_refresh_token(token: str, db: Session) -> Optional[models.RefreshToken]:
+    """Verify if a refresh token is valid and not expired"""
+    refresh_token = db.query(models.RefreshToken).filter(
+        models.RefreshToken.token == token,
+        models.RefreshToken.is_revoked == False,
+        models.RefreshToken.expires_at > datetime.utcnow()
+    ).first()
+    
+    return refresh_token
+
+def revoke_refresh_token(token: str, db: Session) -> bool:
+    """Revoke a refresh token"""
+    refresh_token = db.query(models.RefreshToken).filter(
+        models.RefreshToken.token == token
+    ).first()
+    
+    if refresh_token:
+        refresh_token.is_revoked = True
+        db.commit()
+        return True
+    return False
+
+def revoke_all_user_refresh_tokens(user_id: int, db: Session) -> bool:
+    """Revoke all refresh tokens for a user"""
+    refresh_tokens = db.query(models.RefreshToken).filter(
+        models.RefreshToken.user_id == user_id,
+        models.RefreshToken.is_revoked == False
+    ).all()
+    
+    for token in refresh_tokens:
+        token.is_revoked = True
+    
+    db.commit()
+    return True
 
 def create_session_token():
     """Create a unique session token"""
